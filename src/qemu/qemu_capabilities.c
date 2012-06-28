@@ -167,6 +167,8 @@ VIR_ENUM_IMPL(qemuCaps, QEMU_CAPS_LAST,
               "dump-guest-memory",
               "nec-usb-xhci",
 
+              "bridge", /* 98 */
+
     );
 
 struct qemu_feature_flags {
@@ -1005,7 +1007,7 @@ qemuCapsComputeCmdFlags(const char *help,
                         bool check_yajl ATTRIBUTE_UNUSED)
 {
     const char *p;
-    const char *fsdev;
+    const char *fsdev, *netdev;
 
     if (strstr(help, "-no-kqemu"))
         qemuCapsSet(flags, QEMU_CAPS_KQEMU);
@@ -1118,13 +1120,17 @@ qemuCapsComputeCmdFlags(const char *help,
     if (strstr(help, "-smbios type"))
         qemuCapsSet(flags, QEMU_CAPS_SMBIOS_TYPE);
 
-    if (strstr(help, "-netdev")) {
+    if ((netdev = strstr(help, "-netdev"))) {
         /* Disable -netdev on 0.12 since although it exists,
          * the corresponding netdev_add/remove monitor commands
          * do not, and we need them to be able to do hotplug.
          * But see below about RHEL build. */
-        if (version >= 13000)
-            qemuCapsSet(flags, QEMU_CAPS_NETDEV);
+        if (version >= 13000) {
+            if (strstr(netdev, "bridge"))
+                qemuCapsSet(flags, QEMU_CAPS_NETDEV_BRIDGE);
+            else
+                qemuCapsSet(flags, QEMU_CAPS_NETDEV);
+        }
     }
 
     if (strstr(help, "-sdl"))

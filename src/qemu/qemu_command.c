@@ -2851,6 +2851,8 @@ error:
 
 char *
 qemuBuildHostNetStr(virDomainNetDefPtr net,
+                    struct qemud_driver *driver,
+                    virBitmapPtr qemuCaps,
                     char type_sep,
                     int vlan,
                     const char *tapfd,
@@ -2859,6 +2861,7 @@ qemuBuildHostNetStr(virDomainNetDefPtr net,
     bool is_tap = false;
     virBuffer buf = VIR_BUFFER_INITIALIZER;
     enum virDomainNetType netType = virDomainNetGetActualType(net);
+    const char *brname = NULL;
 
     if (net->script && netType != VIR_DOMAIN_NET_TYPE_ETHERNET) {
         qemuReportError(VIR_ERR_CONFIG_UNSUPPORTED,
@@ -2868,8 +2871,16 @@ qemuBuildHostNetStr(virDomainNetDefPtr net,
     }
 
     switch (netType) {
-    case VIR_DOMAIN_NET_TYPE_NETWORK:
     case VIR_DOMAIN_NET_TYPE_BRIDGE:
+        if (!driver->privileged ||
+            qemuCapsGet(qemuCaps, QEMU_CAPS_NETDEV_BRIDGE)) {
+            brname = virDomainNetGetActualBridgeName(net);
+            virBufferAsprintf(&buf, "bridge%cbr=%s", type_sep, brname);
+            type_sep = ',';
+            is_tap = true;
+            break;
+        }
+    case VIR_DOMAIN_NET_TYPE_NETWORK:
     case VIR_DOMAIN_NET_TYPE_DIRECT:
         virBufferAsprintf(&buf, "tap%cfd=%s", type_sep, tapfd);
         type_sep = ',';
@@ -4997,7 +5008,7 @@ qemuBuildCommandLine(virConnectPtr conn,
         for (i = 0 ; i < def->nnets ; i++) {
             virDomainNetDefPtr net = def->nets[i];
             char *nic, *host;
-            char tapfd_name[50];
+            char tapfd_name[50] = "";
             char vhostfd_name[50] = "";
             int vlan;
             int bootindex = bootNet;
@@ -5032,19 +5043,27 @@ qemuBuildCommandLine(virConnectPtr conn,
                 continue;
             }
 
+            /*
+             * If type='bridge' then we attempt to allocate the tap fd here only if
+             * running under a privilged user or if -netdev bridge is not available.
+             */
             if (actualType == VIR_DOMAIN_NET_TYPE_NETWORK ||
                 actualType == VIR_DOMAIN_NET_TYPE_BRIDGE) {
-                int tapfd = qemuNetworkIfaceConnect(def, conn, driver, net,
-                                                    qemuCaps);
-                if (tapfd < 0)
-                    goto error;
+                if (actualType == VIR_DOMAIN_NET_TYPE_NETWORK ||
+                    driver->privileged ||
+                    (!qemuCapsGet(qemuCaps, QEMU_CAPS_NETDEV_BRIDGE))) {
+                    int tapfd = qemuNetworkIfaceConnect(def, conn, driver, net,
+                                                        qemuCaps);
+                    if (tapfd < 0)
+                        goto error;
 
-                last_good_net = i;
-                virCommandTransferFD(cmd, tapfd);
+                    last_good_net = i;
+                    virCommandTransferFD(cmd, tapfd);
 
-                if (snprintf(tapfd_name, sizeof(tapfd_name), "%d",
-                             tapfd) >= sizeof(tapfd_name))
-                    goto no_memory;
+                    if (snprintf(tapfd_name, sizeof(tapfd_name), "%d",
+                                 tapfd) >= sizeof(tapfd_name))
+                        goto no_memory;
+                }
             } else if (actualType == VIR_DOMAIN_NET_TYPE_DIRECT) {
                 int tapfd = qemuPhysIfaceConnect(def, driver, net,
                                                  qemuCaps, vmop);
@@ -5087,8 +5106,9 @@ qemuBuildCommandLine(virConnectPtr conn,
             if (qemuCapsGet(qemuCaps, QEMU_CAPS_NETDEV) &&
                 qemuCapsGet(qemuCaps, QEMU_CAPS_DEVICE)) {
                 virCommandAddArg(cmd, "-netdev");
-                if (!(host = qemuBuildHostNetStr(net, ',', vlan,
-                                                 tapfd_name, vhostfd_name)))
+                if (!(host = qemuBuildHostNetStr(net, driver, qemuCaps,
+                                                 ',', vlan, tapfd_name,
+                                                 vhostfd_name)))
                     goto error;
                 virCommandAddArg(cmd, host);
                 VIR_FREE(host);
@@ -5110,8 +5130,9 @@ qemuBuildCommandLine(virConnectPtr conn,
             if (!(qemuCapsGet(qemuCaps, QEMU_CAPS_NETDEV) &&
                   qemuCapsGet(qemuCaps, QEMU_CAPS_DEVICE))) {
                 virCommandAddArg(cmd, "-net");
-                if (!(host = qemuBuildHostNetStr(net, ',', vlan,
-                                                 tapfd_name, vhostfd_name)))
+                if (!(host = qemuBuildHostNetStr(net, driver, qemuCaps,
+                                                 ',', vlan, tapfd_name,
+                                                 vhostfd_name)))
                     goto error;
                 virCommandAddArg(cmd, host);
                 VIR_FREE(host);
